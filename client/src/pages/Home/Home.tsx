@@ -19,11 +19,18 @@ interface sendDataType {
   duration: number;
   start_time: number;
   type: number;
+  provider: string;
 }
+const PROVIDERS = [
+  { label: "Zoom", value: "zoom" },
+  { label: "Google Meet", value: "google" },
+];
+
 const Home = () => {
   const [visible, setVisible] = useState<boolean>(false);
   const [loading, setLoading] = useState(false);
   const [meetingType, setMeetingType] = useState<string | null>(null);
+  const [provider, setProvider] = useState<string>(PROVIDERS[0].value);
 
   const { data, fetchData } = useGetData(`/api/meet/today`);
 
@@ -48,7 +55,7 @@ const Home = () => {
         setVisible(true);
         setMeetingType("meet");
       },
-      className: "bg-[#FF742E]",
+      className: "bg-[#FF742E]"
     },
     {
       id: 1,
@@ -59,13 +66,13 @@ const Home = () => {
         setVisible(true);
         setMeetingType("schedule");
       },
-      className: "bg-[#830EF9]",
+      className: "bg-[#830EF9]"
     },
   ];
   const formList = [
     {
       id: 0,
-      formType: "input",
+      formType: "input" as const,
       type: "text",
       fieldName: "topic",
       validator: {
@@ -78,8 +85,10 @@ const Home = () => {
       label: "Topic",
       placeholder: "Enter meeting topic",
     },
-    meetingType === "schedule"
-      ? {
+    // Only include the schedule field if needed
+    ...(meetingType === "schedule"
+      ? [
+        {
           id: 1,
           formType: "input",
           type: "datetime-local",
@@ -89,8 +98,9 @@ const Home = () => {
           },
           label: "Date & Time",
           placeholder: "Select Date & Time",
-        }
-      : null,
+        },
+      ]
+      : []),
     {
       id: 5,
       formType: "textarea",
@@ -106,11 +116,11 @@ const Home = () => {
       placeholder: "Enter meeting agenda",
     },
   ];
-  const onSubmit = async (data) => {
+  const onSubmit = async (data: any) => {
     try {
       setLoading(true);
       const { topic, agenda, start_time } = data;
-      const sendData: sendDataType = {
+      const sendData: sendDataType & { provider: string } = {
         topic,
         agenda,
         start_time:
@@ -119,6 +129,7 @@ const Home = () => {
             : start_time,
         duration: 30,
         type: meetingType === "meet" ? 1 : 2,
+        provider,
       };
 
       const response = await axiosInstance.post("/api/meet/zoom", sendData);
@@ -134,7 +145,11 @@ const Home = () => {
       }
     } catch (err) {
       console.log("error", err);
-      toast.error(err?.response.data.errors);
+      const errorMessage =
+        (err as any)?.response?.data?.errors ||
+        (err as any)?.message ||
+        "An error occurred";
+      toast.error(errorMessage);
       setVisible(false);
       reset();
     } finally {
@@ -157,7 +172,7 @@ const Home = () => {
         <section className="grid gap-3.5">
           <h3 className="text-2xl font-bold">Today’s Upcoming Meetings</h3>
           <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {data?.map((item) => (
+            {data?.map((item: any) => (
               <Meeting_Card key={item?.meetingId} data={item} />
             ))}
           </section>
@@ -177,10 +192,28 @@ const Home = () => {
       >
         <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5">
           <div className="grid gap-4">
+            {/* Provider Dropdown */}
+            <div className="flex flex-col gap-2">
+              <label htmlFor="provider" className="text-base capitalize">
+                Meeting Provider
+              </label>
+              <select
+                id="provider"
+                value={provider}
+                onChange={(e) => setProvider(e.target.value)}
+                className="input border-blue-800"
+              >
+                {PROVIDERS.map((p) => (
+                  <option key={p.value} value={p.value}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </div>
             <Form
               formList={formList}
               control={control}
-              errors={errors}
+              errors={errors as any}
               loading={loading}
             />
           </div>

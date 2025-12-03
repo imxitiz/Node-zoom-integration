@@ -1,49 +1,17 @@
-import axios from "axios";
-// model
 import Meeting from "./meeting.model.js";
-
-// utils
 import agenda from "../../utils/agenda.js";
 import Email from "../../utils/sendEmail.js";
 import appErrors from "../../utils/appErrors.js";
 import apiFeatures from "../../utils/apiFeatures.js";
 import asyncWrapper from "../../utils/asyncWrapper.js";
 import serializeBody from "../../utils/serializeBody.js";
-
-// Get Zoom Access Token
-const getZoomAccessToken = async () => {
-  try {
-    const response = await axios.post(
-      "https://zoom.us/oauth/token",
-      {
-        grant_type: "account_credentials",
-        account_id: process.env.ZOOM_ACCOUNT_ID,
-      },
-      {
-        headers: {
-          Authorization: `Basic ${Buffer.from(
-            `${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`
-          ).toString("base64")}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      }
-    );
-
-    return response.data.access_token;
-  } catch (err) {
-    console.error(
-      "Error fetching Zoom Access Token:",
-      err.response?.data || err.message || err
-    );
-    throw new appErrors("Failed to retrieve Zoom access token", 500);
-  }
-};
+import { getMeetingProvider } from "../../services/meetingProvider.js";
 
 // Create Zoom Meeting
 export const createMeeting = asyncWrapper(async (req, res, next) => {
   const user = req.user;
   const requiredFields = ["agenda", "topic", "type"];
-  const allowFields = ["duration", "schedule_for", "start_time"];
+  const allowFields = ["duration", "schedule_for", "start_time", "end_time", "attendees", "provider"];
   const filterdData = serializeBody(
     req.body,
     next,
@@ -76,32 +44,22 @@ export const createMeeting = asyncWrapper(async (req, res, next) => {
 
   if (filterdData?.start_time) {
     const meetingStartTime = new Date(filterdData.start_time);
-
     if (meetingStartTime <= currentTime) {
       return next(new appErrors("Start time should be in the future", 400));
     }
   }
 
   // check if user has already meet at this time will have at least half hour between two meeting
-
   if (filterdData.type == 2) {
     const newStartTime = new Date(filterdData.start_time);
     const thirtyMinutesInMillis = 30 * 60 * 1000;
-    const userMeetings = await Meeting.find({
-      user: user._id,
-    });
-
+    const userMeetings = await Meeting.find({ user: user._id });
     for (const meeting of userMeetings) {
       const meetingStart = new Date(meeting.start_time);
-      const meetingEnd = new Date(
-        meetingStart.getTime() +
-          (meeting.duration * 60000 || thirtyMinutesInMillis)
-      );
-
+      const meetingEnd = new Date(meetingStart.getTime() + (meeting.duration * 60000 || thirtyMinutesInMillis));
       if (
         (newStartTime >= meetingStart && newStartTime < meetingEnd) ||
-        (newStartTime < meetingStart &&
-          newStartTime + thirtyMinutesInMillis > meetingStart)
+        (newStartTime < meetingStart && newStartTime + thirtyMinutesInMillis > meetingStart)
       ) {
         return next(
           new appErrors(
@@ -112,83 +70,56 @@ export const createMeeting = asyncWrapper(async (req, res, next) => {
       }
     }
   }
+
+  // Select provider (default: zoom)
+  const provider = filterdData.provider || 'zoom';
+  const meetingProvider = getMeetingProvider(provider);
+
   try {
-    const token = await getZoomAccessToken();
-
-    if (!token) {
-      return next(new appErrors("Failed to retrieve Zoom access token", 500));
-    }
-
-    const meetingResponse = await axios.post(
-      "https://api.zoom.us/v2/users/me/meetings",
-      {
-        topic: filterdData.topic,
-        type: filterdData.type, // 1 = instant, 2 = scheduled
-        agenda: filterdData.agenda,
-        duration: filterdData.duration || 30,
-        start_time:
-          filterdData.type === 2
-            ? filterdData.start_time
-            : new Date().toISOString(),
-        host_email: user.email,
-        default_password: false,
-        settings: {
-          join_before_host: true,
-          host_video: true,
-          participant_video: true,
-          waiting_room: false,
-          enforce_login: false,
-          approval_type: 0,
-          allow_multiple_devices: true,
-          // alternative_hosts_email_notification: false,
-          audio: "voip",
-          mute_upon_entry: true,
-        },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-    if (meetingResponse.status === 201) {
-      const meeting = await Meeting.create({
-        user: user._id,
-        zoom_url: meetingResponse.data.join_url,
-        topic: filterdData.topic,
-        type: filterdData.type,
-        agenda: filterdData.agenda,
-        duration: filterdData.duration || 30,
-        start_time:
-          filterdData.type == 2
-            ? filterdData.start_time
-            : new Date().toISOString(),
+    // Prepare meetingData for provider
+    const meetingData = {
+      topic: filterdData.topic,
+      agenda: filterdData.agenda,
+      duration: filterdData.duration || 30,
+      start_time: filterdData.start_time || new Date().toISOString(),
+      end_time: filterdData.end_time,
+      attendees: filterdData.attendees,
+      type: filterdData.type,
+      host_email: user.email,
+      user,
+    };
+    const meetingResponse = await meetingProvider.createMeeting(meetingData);
+    const meeting = await Meeting.create({
+      user: user._id,
+      zoom_url: meetingResponse.join_url,
+      topic: filterdData.topic,
+      type: filterdData.type,
+      agenda: filterdData.agenda,
+      duration: filterdData.duration || 30,
+      start_time: filterdData.start_time || new Date().toISOString(),
+      provider,
+      provider_meeting_id: meetingResponse.id || meetingResponse.eventId,
+    });
+    if (filterdData.type == 1) {
+      res.status(201).json({
+        message: "Meeting created successfully",
+        meeting,
       });
-      if (filterdData.type == 1) {
-        res.status(201).json({
-          message: "Meeting created successfully",
-          meeting,
-        });
-      } else {
-        res.status(201).json({
-          message: "Meeting scheduled successfully",
-        });
-        await agenda.schedule(filterdData.start_time, "send zoom url", {
-          meetingId: meeting._id,
-          meeting: meeting,
-          user: {
-            email: user.email,
-            full_name: user.full_name,
-          },
-        });
-      }
+    } else {
+      res.status(201).json({
+        message: "Meeting scheduled successfully",
+      });
+      await agenda.schedule(filterdData.start_time, "send zoom url", {
+        meetingId: meeting._id,
+        meeting: meeting,
+        user: {
+          email: user.email,
+          full_name: user.full_name,
+        },
+      });
     }
   } catch (error) {
-    console.error(
-      "Error creating Zoom meeting:",
-      error?.response?.data || error
-    );
+    console.error("Error creating meeting:", error?.response?.data || error);
     return next(new appErrors(error, 500));
   }
 });
@@ -247,10 +178,10 @@ export const upcomingMeet = asyncWrapper(async (req, res, next) => {
     have_upcoming_meet: meet ? true : false,
     meet_time: meet
       ? new Date(meet.start_time).toLocaleTimeString("en-us", {
-          hour: "2-digit",
-          minute: "2-digit",
-          hour12: true,
-        })
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+      })
       : null,
   });
 });
@@ -279,18 +210,18 @@ export const todayUpcomingMeet = asyncWrapper(async (req, res, next) => {
   let meetingList =
     meetings?.length > 0
       ? meetings.map((meet) => {
-          const startTime = new Date(meet.start_time).getTime();
-          const duration = (meet.duration || 30) * 60 * 1000;
-          const endTime = startTime + duration;
-          const bufferMinutes = 5;
-          const visibleBefore = startTime - bufferMinutes * 60 * 1000;
+        const startTime = new Date(meet.start_time).getTime();
+        const duration = (meet.duration || 30) * 60 * 1000;
+        const endTime = startTime + duration;
+        const bufferMinutes = 5;
+        const visibleBefore = startTime - bufferMinutes * 60 * 1000;
 
-          if (!(timeNow >= visibleBefore && timeNow <= endTime)) {
-            meet.zoom_url = null;
-          }
+        if (!(timeNow >= visibleBefore && timeNow <= endTime)) {
+          meet.zoom_url = null;
+        }
 
-          return meet;
-        })
+        return meet;
+      })
       : [];
   res.status(200).json(meetingList);
 });
